@@ -4,133 +4,145 @@ import numpy as np
 import os
 import plotly.express as px
 import plotly.graph_objects as go
+import base64
 from sklearn.decomposition import PCA
 from scipy.spatial.distance import cdist
 
-# --- 1. FUNKCJA ŁADOWANIA WAG ---
-def load_weights(file_path):
-    if os.path.exists(file_path):
+# --- 1. FUNKCJA GENEROWANIA ESTETYCZNEGO RAPORTU ---
+def generate_report_text(target, closest, farthest, fig_radar, fig_pcoa):
+    def fig_to_base64(fig):
         try:
-            w_df = pd.read_csv(file_path, sep=None, engine='python')
-            w_df.columns = [c.strip() for c in w_df.columns]
-            # Szukamy kolumn niezależnie od wielkości liter
-            t_col = [c for c in w_df.columns if c.lower() == 'trait'][0]
-            w_col = [c for c in w_df.columns if c.lower() == 'weight'][0]
-            return dict(zip(w_df[t_col], w_df[w_col]))
-        except: return {}
-    return {}
+            img_bytes = fig.to_image(format="png", width=1000, height=600)
+            return base64.b64encode(img_bytes).decode()
+        except: return ""
 
-# --- 2. KONFIGURACJA STRONY ---
-st.set_page_config(page_title="Doktorat LEDA - PCoA", layout="wide")
+    radar_img = fig_to_base64(fig_radar)
+    pcoa_img = fig_to_base64(fig_pcoa)
+
+    return f"""
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <style>
+            @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap');
+            body {{ font-family: 'Inter', sans-serif; margin: 50px; color: #1e293b; background-color: #ffffff; }}
+            h1 {{ color: #064e3b; font-size: 28px; border-bottom: 3px solid #059669; padding-bottom: 10px; }}
+            h2 {{ color: #065f46; font-size: 20px; margin-top: 40px; text-transform: uppercase; letter-spacing: 1px; }}
+            .card {{ border: 1px solid #e2e8f0; border-radius: 12px; padding: 20px; margin: 20px 0; background: #f8fafc; box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1); }}
+            table {{ border-collapse: collapse; width: 100%; margin-top: 15px; border-radius: 8px; overflow: hidden; }}
+            th {{ background-color: #059669; color: white; padding: 12px; text-align: left; font-size: 14px; }}
+            td {{ padding: 10px; border-bottom: 1px solid #e2e8f0; font-size: 14px; background: white; }}
+            .img-container {{ text-align: center; margin-top: 20px; }}
+            .img-container img {{ max-width: 100%; border-radius: 8px; border: 1px solid #e2e8f0; }}
+            .footer {{ margin-top: 60px; font-size: 12px; color: #64748b; text-align: center; border-top: 1px solid #e2e8f0; padding-top: 20px; }}
+        </style>
+    </head>
+    <body>
+        <h1>Raport Ekologiczny: {target}</h1>
+        <p>Analiza dystansu funkcjonalnego na podstawie bazy LEDA</p>
+
+        <div class="card">
+            <h2>1. Profil Funkcjonalny (Radar)</h2>
+            <div class="img-container"><img src="data:image/png;base64,{radar_img}"></div>
+        </div>
+
+        <div class="card">
+            <h2>2. Pozycja w przestrzeni cech (PCoA)</h2>
+            <div class="img-container"><img src="data:image/png;base64,{pcoa_img}"></div>
+        </div>
+
+        <div class="card">
+            <h2>3. Zestawienie Podobieństwa</h2>
+            <h3>Gatunki najbardziej podobne</h3>
+            {closest.to_html(index=False)}
+            <br>
+            <h3>Gatunki najbardziej odmienne</h3>
+            {farthest.to_html(index=False)}
+        </div>
+
+        <div class="footer">
+            Wygenerowano automatycznie | System Analizy LEDA | {pd.Timestamp.now().strftime('%Y-%m-%d')}
+        </div>
+    </body>
+    </html>
+    """
+
+# --- 2. USTAWIENIA I DANE ---
+st.set_page_config(page_title="Analiza LEDA", layout="wide")
 st.title("Analiza Porównawcza Gatunków LEDA")
 
 matrix_file = 'macierz_wynikowa.xlsx'
-weights_file = 'wagi.csv'
-
 if not os.path.exists(matrix_file):
-    st.error(f"Nie znaleziono pliku {matrix_file}. Upewnij się, że analiza.py zadziałała.")
+    st.error("Brak pliku macierz_wynikowa.xlsx")
 else:
-    # --- 3. WCZYTYWANIE DANYCH ---
     df = pd.read_excel(matrix_file)
-    weights = load_weights(weights_file)
-    
-    # Rozpoznanie kolumn na podstawie Twojego pliku
-    # Kolumna 0: SBS number, Kolumna 1: SBS name, Reszta: Cechy
-    name_col = df.columns[1] 
+    name_col = df.columns[1]
     trait_cols = df.columns[2:]
-    
-    # Przygotowanie danych (X) do obliczeń
     X = df[trait_cols].fillna(0)
-    for col in X.columns:
-        base_trait = col.split('_v')[0]
-        X[col] = X[col] * weights.get(base_trait, 1.0)
 
-    # --- 4. OBLICZENIA PCoA ---
+    # --- 3. OBLICZENIA ---
     pca = PCA(n_components=2)
     coords = pca.fit_transform(X)
     df_pcoa = pd.DataFrame(coords, columns=['PC1', 'PC2'])
     df_pcoa['Gatunek'] = df[name_col]
 
-    # --- 5. WYBÓR ROŚLINY I SĄSIEDZTWO ---
-    st.sidebar.header("Wybierz roślinę do analizy")
+    # --- 4. PASEK BOCZNY ---
+    st.sidebar.header("Ustawienia Analizy")
     target_plant = st.sidebar.selectbox("Gatunek referencyjny:", df_pcoa['Gatunek'].unique())
-
-    # Obliczanie dystansów euklidesowych w przestrzeni cech (Gower-like)
-    # Wybieramy wektor cech wybranej rośliny
     target_idx = df[df[name_col] == target_plant].index[0]
-    target_vector = X.iloc[[target_idx]]
     
-    # Dystans do wszystkich innych
+    # Dystanse
+    target_vector = X.iloc[[target_idx]]
     distances = cdist(target_vector, X, metric='euclidean')[0]
     df_pcoa['Distance'] = distances
-    
-    # Sortowanie
     df_sorted = df_pcoa[df_pcoa['Gatunek'] != target_plant].sort_values('Distance')
+    
     najblizsze = df_sorted.head(5)
     najdalsze = df_sorted.tail(5)
 
-    # --- 6. WIZUALIZACJA: WYKRES PCoA ---
-    col1, col2 = st.columns([2, 1])
+    # --- 5. GÓRA: DWIE KOLUMNY (TABELE I RADAR) ---
+    col_tabele, col_radar = st.columns([1, 2])
     
-    with col1:
-        st.subheader("Przestrzeń cech (PCoA)")
-        fig_pcoa = px.scatter(df_pcoa, x='PC1', y='PC2', text='Gatunek', 
-                             color='Distance', color_continuous_scale='Viridis',
-                             height=700)
-        fig_pcoa.update_traces(textposition='top center', marker=dict(size=12))
-        st.plotly_chart(fig_pcoa, use_container_width=True)
-
-    with col2:
-        st.subheader("Sąsiedztwo ekologiczne")
-        st.write("**5 Najbardziej podobnych:**")
-        st.dataframe(najblizsze[['Gatunek', 'Distance']], hide_index=True)
+    with col_tabele:
+        st.subheader("Gatunki podobne")
+        st.table(najblizsze[['Gatunek', 'Distance']])
         
-        st.write("**5 Najbardziej odmiennych:**")
-        st.dataframe(najdalsze[['Gatunek', 'Distance']], hide_index=True)
+        st.subheader("Gatunki odmienne")
+        st.table(najdalsze[['Gatunek', 'Distance']])
+
+    with col_radar:
+        st.subheader(f"Profil funkcjonalny: {target_plant}")
+        base_traits = sorted(list(set([c.split('_v')[0] for c in trait_cols])))
+        
+        def get_radar_vals(idx):
+            return [df.loc[idx, [c for c in trait_cols if c.startswith(bt)]].mean() for bt in base_traits]
+
+        fig_radar = go.Figure()
+        fig_radar.add_trace(go.Scatterpolar(r=get_radar_vals(target_idx), theta=base_traits, fill='toself', name=target_plant))
+        nn_idx = df[df[name_col] == najblizsze.iloc[0]['Gatunek']].index[0]
+        fig_radar.add_trace(go.Scatterpolar(r=get_radar_vals(nn_idx), theta=base_traits, fill='toself', name="Najbliższy sąsiad"))
+        
+        fig_radar.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 1])), height=500, margin=dict(t=30, b=30))
+        st.plotly_chart(fig_radar, use_container_width=True)
 
     st.divider()
 
-    # --- 7. WYKRES RADAROWY ---
-    st.subheader(f"Profil cech: {target_plant}")
-    
-    # Przygotowanie danych do radaru (tylko główne cechy, bez wektorów _v)
-    # Agregujemy kolumny wektorowe do średniej, żeby radar był czytelny
-    main_traits = sorted(list(set([c.split('_v')[0] for c in trait_cols])))
-    
-    radar_vals = []
-    for mt in main_traits:
-        related_cols = [c for c in trait_cols if c.startswith(mt)]
-        val = df.loc[target_idx, related_cols].mean()
-        radar_vals.append(val)
+    # --- 6. DÓŁ: PCoA (SZEROKI) ---
+    st.subheader("Mapa PCoA (Principal Coordinate Analysis)")
+    fig_pcoa = px.scatter(df_pcoa, x='PC1', y='PC2', text='Gatunek', color='Distance', color_continuous_scale='Viridis_r', height=700)
+    fig_pcoa.update_traces(textposition='top center', marker=dict(size=15, line=dict(width=1, color='white')))
+    st.plotly_chart(fig_pcoa, use_container_width=True)
 
-    fig_radar = go.Figure()
-    fig_radar.add_trace(go.Scatterpolar(
-        r=radar_vals,
-        theta=main_traits,
-        fill='toself',
-        name=target_plant,
-        line_color='green'
-    ))
+    # --- 7. EKSPORT (W SIDEBARZE) ---
+    report_content = generate_report_text(target_plant, 
+                                         najblizsze[['Gatunek', 'Distance']], 
+                                         najdalsze[['Gatunek', 'Distance']],
+                                         fig_radar, fig_pcoa)
     
-    # Dodanie najbliższego sąsiada dla porównania
-    nearest_neighbor_name = najblizsze.iloc[0]['Gatunek']
-    nn_idx = df[df[name_col] == nearest_neighbor_name].index[0]
-    nn_vals = []
-    for mt in main_traits:
-        related_cols = [c for c in trait_cols if c.startswith(mt)]
-        nn_vals.append(df.loc[nn_idx, related_cols].mean())
-
-    fig_radar.add_trace(go.Scatterpolar(
-        r=nn_vals,
-        theta=main_traits,
-        fill='toself',
-        name=f"Najbliższy: {nearest_neighbor_name}",
-        line_color='rgba(255, 0, 0, 0.5)'
-    ))
-
-    fig_radar.update_layout(
-        polar=dict(radialaxis=dict(visible=True, range=[0, 1])),
-        showlegend=True,
-        height=600
+    st.sidebar.markdown("---")
+    st.sidebar.download_button(
+        label="📄 Pobierz Estetyczny Raport PDF",
+        data=report_content,
+        file_name=f"Raport_LEDA_{target_plant}.html",
+        mime="text/html"
     )
-    st.plotly_chart(fig_radar, use_container_width=True)
